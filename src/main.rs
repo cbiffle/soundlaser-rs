@@ -86,13 +86,10 @@ fn DMA1_CHANNEL1() {
         // Update the waveform.
         let sample = u32::from(sample);
         let (first_half, second_half) = WAVETABLE.split_at(COEFFICIENTS.len());
-        for (out, &coeff) in first_half.iter().zip(&COEFFICIENTS) {
-            let x = 0x7ff + ((sample * u32::from(coeff)) >> 16);
-            out.store(x, Ordering::Relaxed);
-        }
-        for (out, &coeff) in second_half.iter().zip(&COEFFICIENTS) {
-            let x = 0x7ff_u32.wrapping_sub((sample * u32::from(coeff)) >> 16);
-            out.store(x, Ordering::Relaxed);
+        for ((out1, out2), &coeff) in first_half.iter().zip(second_half).zip(&COEFFICIENTS) {
+            let x = (sample * u32::from(coeff)) >> 16;
+            out1.store(0x7ff + x, Ordering::Relaxed);
+            out2.store(0x7ff_u32.wrapping_sub(x), Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
