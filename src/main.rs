@@ -87,11 +87,11 @@ fn DMA1_CHANNEL1() {
         let sample = u32::from(sample);
         let (first_half, second_half) = WAVETABLE.split_at(COEFFICIENTS.len());
         for (out, coeff) in first_half.iter().zip(COEFFICIENTS) {
-            let x = 0x7ff + ((sample * coeff) >> 16);
+            let x = 0x7ff + (sample.wrapping_mul(coeff) >> 16);
             out.store(x, Ordering::Relaxed);
         }
         for (out, coeff) in second_half.iter().zip(COEFFICIENTS) {
-            let x = 0x7ff - ((sample * coeff) >> 16);
+            let x = 0x7ff - (sample.wrapping_mul(coeff) >> 16);
             out.store(x, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
