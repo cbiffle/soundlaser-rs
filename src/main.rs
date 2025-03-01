@@ -86,11 +86,11 @@ fn DMA1_CHANNEL1() {
         // Update the waveform.
         let sample = u32::from(sample);
         let (first_half, second_half) = WAVETABLE.split_at(COEFFICIENTS.len());
-        for (out, coeff) in first_half.iter().zip(COEFFICIENTS) {
+        for (out, &coeff) in first_half.iter().zip(&COEFFICIENTS) {
             let x = 0x7ff + (sample.wrapping_mul(coeff) >> 16);
             out.store(x, Ordering::Relaxed);
         }
-        for (out, coeff) in second_half.iter().zip(COEFFICIENTS) {
+        for (out, &coeff) in second_half.iter().zip(&COEFFICIENTS) {
             let x = 0x7ff - (sample.wrapping_mul(coeff) >> 16);
             out.store(x, Ordering::Relaxed);
         }
@@ -383,7 +383,7 @@ fn configure_sample_timer() {
 static WAVETABLE: [AtomicU32; WAVETABLE_SIZE as usize] = [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize];
 static mut LAST_SAMPLE: u16 = 0;
 
-const COEFFICIENTS: [u32; WAVETABLE_SIZE as usize / 2] = [
+static COEFFICIENTS: [u32; WAVETABLE_SIZE as usize / 2] = [
     0,
     (1 << (16 - 4)) + (1 << (16 - 5)) + (1 << (16 - 8)),
     (1 << (16 - 3)) + (1 << (16 - 4)) + (1 << (16 - 8)),
