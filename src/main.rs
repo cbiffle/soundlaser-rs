@@ -91,7 +91,7 @@ fn DMA1_CHANNEL1() {
             out.store(x, Ordering::Relaxed);
         }
         for (out, &coeff) in second_half.iter().zip(&COEFFICIENTS) {
-            let x = 0x7ff_u32.saturating_sub(sample.wrapping_mul(coeff) >> 16);
+            let x = 0x7ff_u32.wrapping_sub(sample.wrapping_mul(coeff) >> 16);
             out.store(x, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
