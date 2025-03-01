@@ -1,0 +1,26 @@
+[package]
+name = "knockoff"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7.5"
+panic-halt = "1.0.0"
+portable-atomic = { version = "1.11.0", features = ["unsafe-assume-single-core"] }
+stm32-metapac = {version = "16.0.0", features = ["rt","pac","stm32f051c6"]}
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+codegen-units = 1
+debug = true
+lto = true
+opt-level = "s"
+overflow-checks = true
+
+[[bin]]
+name = "knockoff"
+test = false
+bench = false
