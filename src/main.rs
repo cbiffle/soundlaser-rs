@@ -4,8 +4,13 @@
 //!
 //! Ultrasound output should be delivered to PA4 (DAC_OUT1).
 //!
-//! PB12 and PB14 appear to be indicator LEDs. PB5 has a mysterious function I
-//! don't understand yet.
+//! PB12 and PB14 appear to be indicator LEDs. PB3 and PB5 have mysterious
+//! functions I don't understand yet. PB3 does not appear to be routed, PB5 is
+//! routed to what appears to be a footprint for a bluetooth module (not
+//! installed).
+//!
+//! There are LEDs on PB12-14. The stock firmware never uses the one on PB13
+//! except to briefly blink it at boot.
 //!
 //! No oscillator is available in the system.
 //!
@@ -20,7 +25,7 @@ use core::{ops::Range, ptr::addr_of, sync::atomic::Ordering};
 use portable_atomic::AtomicU32;
 
 use panic_halt as _;
-use stm32_metapac::{self as pac, interrupt, flash::vals::Latency, gpio::vals::{Moder, Ospeedr}, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
+use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
 
 const WAVETABLE_SIZE: u16 = 32;
 const TARGET_FREQ: u32 = 40_000;
@@ -185,6 +190,8 @@ fn configure_gpios() {
     // GPIOB: pins PB12, PB13, PB14 in push-pull fast output mode.
     // Note: function of PB13 not currently understood.
     //
+    // PB5 is initially an input with a pullup.
+
     // Pins start initially low.
     pac::GPIOB.bsrr().write(|w| {
         for pin in 12..=14 {
@@ -196,10 +203,15 @@ fn configure_gpios() {
             w.set_ospeedr(pin, Ospeedr::VERY_HIGH_SPEED);
         }
     });
+    pac::GPIOB.pupdr().modify(|w| {
+        w.set_pupdr(5, Pupdr::PULL_UP);
+    });
     pac::GPIOB.moder().modify(|w| {
         for pin in 12..=14 {
             w.set_moder(pin, Moder::OUTPUT);
         }
+        // This should be default at reset, but, hey
+        w.set_moder(5, Moder::INPUT);
     });
 
 }
