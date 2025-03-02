@@ -51,6 +51,13 @@ const CARRIER_FREQ: usize = 40_000;
 /// frequency.
 const CPU_FREQ: usize = 48_000_000;
 
+/// Attenuation to apply to the carrier (and thus all sound output), in powers
+/// of 2.
+///
+/// A value of 0 uses full output power (not recommended), 1 cuts the power to
+/// 50%, 2 cuts it to 25%, and so forth.
+const ATTENUATION: u32 = 1;
+
 /// The middle of the ADC and DAC ranges, used as the "zero" point for incoming
 /// and outgoing waves. Do not change this, it's intrinsic.
 const MIDPOINT: u16 = (u16::MAX / 2) + 1;
@@ -213,7 +220,7 @@ fn regenerate_waveform(which: usize) {
             // the COEFFICIENTS table, but using the full range of u16 makes the
             // range analysis easier on the compiler, and "top half" and "top
             // half divided by 2" are the same cost on ARMv6-M.
-            let x = ((sample * u32::from(coeff)) >> 17) as u16;
+            let x = ((sample * u32::from(coeff)) >> (17 + ATTENUATION)) as u16;
 
             // Range of x:
             //
