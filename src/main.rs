@@ -21,7 +21,7 @@
 #![no_std]
 #![no_main]
 
-use core::{ops::Range, ptr::addr_of, sync::atomic::Ordering};
+use core::{ops::Range, sync::atomic::Ordering};
 use portable_atomic::AtomicU32;
 
 use panic_halt as _;
@@ -42,15 +42,15 @@ fn main() -> ! {
 
     // TODO setup IWDG
 
-    // Unmask our DMA transfer complete interrupt, which is where most of the
-    // actual behavior is implemented.
+    // Unmask our DMA interrupt, which is where most of the actual behavior is
+    // implemented.
     //
     // Safety: this is unsafe if it might break a critical section by allowing
     // preemption by the ISR, but we don't actually share any data with the ISR,
     // so it can preempt us -- go right ahead.
     unsafe {
-        cp.NVIC.set_priority(pac::Interrupt::DMA1_CHANNEL1, 0);
-        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::DMA1_CHANNEL1);
+        cp.NVIC.set_priority(pac::Interrupt::DMA1_CHANNEL2_3, 0);
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::DMA1_CHANNEL2_3);
     }
 
     // This is what kicks off the actual scanout:
@@ -66,17 +66,36 @@ fn main() -> ! {
 }
 
 #[interrupt]
-fn DMA1_CHANNEL1() {
+fn DMA1_CHANNEL2_3() {
+    let isr = pac::DMA1.isr().read();
+
+    if isr.tcif(3 - 1) {
+        // DMA has just finished the second copy of the wavetable, so regenerate
+        // it.
+        regenerate_waveform(1);
+        // Clear DMA CH1 TC flag.
+        pac::DMA1.ifcr().write(|w| {
+            w.set_tcif(3 - 1, true);
+        });
+    }
+
+    if isr.htif(3 - 1) {
+        // DMA has just finished the _first_ copy of the wavetable.
+        regenerate_waveform(0);
+        // Clear DMA CH1 TC flag.
+        pac::DMA1.ifcr().write(|w| {
+            w.set_htif(3 - 1, true);
+        });
+    }
+}
+
+fn regenerate_waveform(which: usize) {
+    pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
+
     static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
 
     // Read the last sample.
-    //
-    // Safety: we're racing the DMA controller, which is deliberate. Both we and
-    // the DMA controller will make atomic accesses to the variable, so we can't
-    // get tearing, only racing.
-    let sample = unsafe {
-        addr_of!(LAST_SAMPLE).read_volatile()
-    };
+    let sample = pac::ADC1.dr().read().data();
 
     const ZERO_RANGE: Range<u16> = 0x76d..0x898;
 
@@ -90,26 +109,22 @@ fn DMA1_CHANNEL1() {
     if quiet_time_now < 0x1200 {
         // Update the waveform.
         let sample = u32::from(sample);
-        let (first_half, second_half) = WAVETABLE.split_at(COEFFICIENTS.len());
-        for ((out1, out2), &coeff) in first_half.iter().zip(second_half).zip(&COEFFICIENTS) {
+        let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
+        for ((outp, outn), &coeff) in pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS) {
             let x = (sample * u32::from(coeff)) >> 16;
-            out1.store(0x7ff + x, Ordering::Relaxed);
-            out2.store(0x7ff_u32.wrapping_sub(x), Ordering::Relaxed);
+            outp.store(0x7ff + x, Ordering::Relaxed);
+            outn.store(0x7ff_u32 - x, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
             w.set_bs(12, true);
             w.set_br(14, true);
         });
-        // Turn DAC DRQ back on just in case we turned it off.
-        pac::DAC1.cr().modify(|w| w.set_dmaen(0, true));
     } else {
         // Blank the stored waveform.
-        for sample in &WAVETABLE {
+        for sample in &WAVETABLE[which] {
             sample.store(0x7ff, Ordering::Relaxed);
         }
-        // Shut off DAC DRQ generation.
-        pac::DAC1.cr().modify(|w| w.set_dmaen(0, false));
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
             w.set_br(12, true);
@@ -117,12 +132,9 @@ fn DMA1_CHANNEL1() {
         });
     }
 
-    // Clear DMA CH1 TC flag.
-    pac::DMA1.ifcr().write(|w| {
-        w.set_tcif(0, true);
-    });
-
     // TODO feed IWDG
+
+    pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
 }
 
 fn configure_clock_tree() {
@@ -217,50 +229,21 @@ fn configure_gpios() {
 }
 
 fn configure_dma() {
-    // This implementation uses two DMA channels. The F0 has probably the
+    // This implementation uses a single DMA channel. The F0 has probably the
     // simplest DMA implementation of the STM32 family, and in particular, has
     // no channel DRQ mux: DRQs are just OR'ed into channels. So, we have a lot
     // of constraints on which channel we use for what.
     //
-    // CH1 (ADC DRQ) moves samples from the ADC into RAM. It's configured for
-    // P-2-M, no increment (sort of), circular.
-    //
     // CH3 (DAC) moves samples from the waveform table to the DAC. It's
-    // configured for M-2-P, MINC, circular. Counter-intuitively, this DMA
-    // channel is not directly driven by the DAC timer TIM2, but rather TIM2
-    // drives the DAC behind the scenes. See the timer setup for more.
+    // configured for M-2-P, MINC, circular. The DRQs to this channel are being
+    // driven on the DAC DRQ, but the DAC is driving its DRQ in response to
+    // TIM2 behind the scenes. See the timer setup routine for more.
     
     // Enable clock to the DMA controller.
     pac::RCC.ahbenr().modify(|w| w.set_dmaen(true));
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
     let dma = pac::DMA1;
-
-    {
-        let ch1 = dma.ch(0 /* 1 - 1 */);
-        ch1.cr().write(|w| {
-            w.set_dir(pac::bdma::vals::Dir::FROM_PERIPHERAL);
-            w.set_pinc(false);
-            w.set_msize(pac::bdma::vals::Size::BITS16);
-            w.set_psize(pac::bdma::vals::Size::BITS16);
-            w.set_circ(true);
-            w.set_pl(pac::bdma::vals::Pl::MEDIUM);
-        });
-        // Transfer one sample, over and over.
-        ch1.ndtr().write(|w| w.set_ndt(1));
-        ch1.par().write(|w| {
-            *w = pac::ADC1.dr().as_ptr() as u32;
-        });
-        ch1.mar().write(|w| {
-            *w = addr_of!(LAST_SAMPLE) as u32;
-        });
-
-        // Turn CH1 on.
-        ch1.cr().modify(|w| w.set_en(true));
-
-        // Enable transfer-complete interrupt.
-        ch1.cr().modify(|w| w.set_tcie(true));
-    }
 
     {
         let ch3 = dma.ch(3 - 1);
@@ -273,7 +256,8 @@ fn configure_dma() {
             w.set_circ(true);
             w.set_pl(pac::bdma::vals::Pl::HIGH);
         });
-        ch3.ndtr().write(|w| w.set_ndt(WAVETABLE_SIZE));
+        // We stream out both copies of the wavetable.
+        ch3.ndtr().write(|w| w.set_ndt(WAVETABLE_SIZE * 2));
         ch3.par().write(|w| {
             *w = pac::DAC1.dhr12r(0).as_ptr() as u32;
         });
@@ -281,10 +265,15 @@ fn configure_dma() {
             *w = WAVETABLE.as_ptr() as u32;
         });
 
+        // Enable both the half-transfer and transfer-complete interrupts.
+        ch3.cr().modify(|w| {
+            w.set_tcie(true);
+            w.set_htie(true);
+        });
+
         // Turn CH3 on.
         ch3.cr().modify(|w| w.set_en(true));
     }
-
 }
 
 fn configure_adc() {
@@ -297,18 +286,12 @@ fn configure_adc() {
     let adc = pac::ADC1;
 
     adc.cfgr1().modify(|w| {
-        // Continue generating DRQs even after last channel is read out.
-        w.set_dmacfg(pac::adc::vals::Dmacfg::CIRCULAR);
         // Continuous conversion
         w.set_cont(true);
 
         // Defaults restated here for clarity.
         w.set_align(pac::adc::vals::Align::RIGHT);
         w.set_res(pac::adc::vals::Res::BITS12);
-    });
-
-    adc.cfgr1().modify(|w| {
-        w.set_dmaen(true);
     });
 
     adc.chselr().write(|w| {
@@ -362,7 +345,8 @@ fn configure_sample_timer() {
     // This configures TIM2 to scan out our wavetable at roughly 44 kHz.
     //
     // TIM2's input clock is PCLK, which we've set to SYSCLK, which is 48 MHz.
-    const DIVISOR: u32 = (48_000_000 / WAVETABLE_SIZE as u32 /* + TARGET_FREQ/2*/) / TARGET_FREQ;
+    const DIVISOR: u32 = (48_000_000 / WAVETABLE_SIZE as u32 + TARGET_FREQ/2)
+        / TARGET_FREQ;
     const SETTING: u32 = DIVISOR - 1; // ensure it's non-zero at compile time.
     
     // Enable clock to TIM2.
@@ -382,8 +366,7 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
-static WAVETABLE: [AtomicU32; WAVETABLE_SIZE as usize] = [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize];
-static mut LAST_SAMPLE: u16 = 0;
+static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize] }; 2];
 
 static COEFFICIENTS: [u16; WAVETABLE_SIZE as usize / 2] = [
     0,
