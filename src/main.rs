@@ -12,9 +12,9 @@
 //! There are LEDs on PB12-14. The stock firmware never uses the one on PB13
 //! except to briefly blink it at boot.
 //!
-//! No oscillator is available in the system.
+//! No external oscillator is available in the system.
 //!
-//! Potentially relevant device errata:
+//! Relevant relevant device errata:
 //!
 //! - 2.5.3 ADEN cannot be set immediately after ADC calibration
 
@@ -332,11 +332,17 @@ fn configure_adc() {
         // spin
     }
 
-    // Enable the ADC.
-    adc.cr().modify(|w| w.set_aden(true));
-    // Wait for it to be ready.
+    // This next bit is written in response to device erratum 2.5.3, "ADEN bit
+    // cannot be set immediately after the ADC calibration." Calibration will
+    // clear ADEN 4 cycles after it completes, so if the compiler puts our store
+    // to CR too close to the checks above, it could get negated.
+    //
+    // This is super unlikely, because a RMW on a Cortex-M0 is at least four
+    // cycles. But still, let's apply the workaround suggested by ST: repeatedly
+    // set ADEN from within the ADRDY wait loop.
     while !adc.isr().read().adrdy() {
-        // spin
+        // Enable the ADC (again?)
+        adc.cr().modify(|w| w.set_aden(true));
     }
 
     // Start it!
