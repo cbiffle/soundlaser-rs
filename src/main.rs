@@ -21,7 +21,7 @@
 #![no_std]
 #![no_main]
 
-use core::{ops::Range, sync::atomic::{AtomicU16, AtomicU32, Ordering}};
+use core::{ops::Range, sync::atomic::{compiler_fence, AtomicU16, AtomicU32, Ordering}};
 
 use panic_halt as _;
 use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, iwdg::vals::Key, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
@@ -48,27 +48,42 @@ const CPU_FREQ: usize = 48_000_000;
 static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE]; 2] =
     [const { [const { AtomicU16::new(0) }; WAVETABLE_SIZE] }; 2];
 
+/// Firmware entry point and main loop.
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    let mut cp = cortex_m::Peripherals::take().unwrap();
-
     // To avoid glitching the output to full-negative for one or two wave
     // cycles, go ahead and initialize the wavetable.
     //
-    // We could also write the `WAVETABLE` static with an initializer that sets
-    // this value, but that's _significantly_ larger in flash.
+    // Yes, this arguably duplicates the setup done before `main`. We could have
+    // written `WAVETABLE` with an initializer that sets each element to
+    // `0x7ff`. However, because memory initialization in rustc/llvm is pretty
+    // naive, this produces a complete initialized copy of `WAVETABLE` in flash
+    // at a cost of (currently) 256 bytes.
+    //
+    // Leaving it in .bss and initializing it with a loop is dramatically
+    // cheaper (about 25% the cost).
     for half in &WAVETABLE {
         for sample in half {
             sample.store(0x7ff, Ordering::Relaxed);
         }
     }
 
+    // Hardware initialization:
+    let mut cp = cortex_m::Peripherals::take().unwrap();
+
+    // This needs to happen first:
     configure_clock_tree();
+
+    // The order of these steps is essentially arbitrary.
     configure_gpios();
     configure_adc();
     configure_dac();
     configure_dma();
 
+    // This should happen after any initialization that might spin (e.g. ADC
+    // calibration, clock setup) but _before_ any output.
+    //
+    // TODO: ...so should the DAC go after this then
     if !cfg!(feature = "disable-iwdg") {
         // Start the watchdog. At this point if we don't start generating
         // waveforms soon, we will reset. (The watchdog is fed from the DMA
@@ -99,6 +114,8 @@ fn main() -> ! {
     }
 }
 
+/// Interrupt service routine triggered twice during each scanout of the
+/// wavetable: once at the halfway point, and once at the end.
 #[interrupt]
 fn DMA1_CHANNEL2_3() {
     let isr = pac::DMA1.isr().read();
@@ -121,19 +138,28 @@ fn DMA1_CHANNEL2_3() {
     }
 }
 
+/// Fills in `WAVEFORM[which]` with a new pattern based on the current ADC
+/// level.
 fn regenerate_waveform(which: usize) {
-    pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
-
-    static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
-
-    // Read the last sample.
-    let sample = pac::ADC1.dr().read().data() as u32;
-
     // Size of band around zero that we treat as "quiet," for the purpose of
     // suppressing the carrier signal.
     const DEADZONE: u32 = 150;
     const ZERO_RANGE: Range<u32> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
 
+    // We update this variable each time through the routine, to keep track of
+    // how long the input has been "quiet."
+    static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
+
+    // Light the middle LED to help indicate how much CPU time is being spent
+    // doing this.
+    pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
+
+    // Read the most recent ADC sample. The ADC updates at around 144 kHz, so
+    // this will be at most 6.94 µs old. (We produce one cycle of output every
+    // 25 µs so this is "recent enough.")
+    let sample = pac::ADC1.dr().read().data() as u32;
+
+    // Increment our quiet-time counter if the sample is close to the midpoint.
     let quiet_time_now = if !ZERO_RANGE.contains(&sample) {
         0
     } else {
@@ -142,20 +168,36 @@ fn regenerate_waveform(which: usize) {
     QUIET_TIME.store(quiet_time_now, Ordering::Relaxed);
 
     if quiet_time_now < 0x1200 {
-        // Update the waveform.
+        // Update the waveform. Since we're generating a sine wave, the two
+        // halves are symmetrical, and we can generate them at the same time by
+        // applying different offsets from the midpoint.
+        //
+        // First, break the waveform table in half:
         let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
-        for ((outp, outn), &coeff) in pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS) {
+        // Now, process the two halves and the coefficient table in parallel.
+        for ((outp, outn), &coeff) in pos_cycle.iter()
+            .zip(neg_cycle)
+            .zip(&COEFFICIENTS)
+        {
+            // Promote both sides to u32 so we can do a 16x16->32
+            // multiplication, and then take the top half.
             let x = (sample * u32::from(coeff)) >> 16;
+            // Generate two samples on opposite sides of our midpoint. Note:
+            // doing the midpoint-offset math before truncating to 16 bits
+            // improves the compiler's ability to reason about overflow in the
+            // addition, since it doesn't take the range of the COEFFICIENTS
+            // table into account.
             outp.store((0x7ff + x) as u16, Ordering::Relaxed);
             outn.store((0x7ff - x) as u16, Ordering::Relaxed);
         }
-        // Switch the state of the indicator lights.
+        // Switch the state of the indicator lights to show that we're producing
+        // a carrier.
         pac::GPIOB.bsrr().write(|w| {
             w.set_bs(12, true);
             w.set_br(14, true);
         });
     } else {
-        // Blank the stored waveform.
+        // Blank the stored waveform to stop producing a carrier.
         for sample in &WAVETABLE[which] {
             sample.store(0x7ff, Ordering::Relaxed);
         }
@@ -171,10 +213,14 @@ fn regenerate_waveform(which: usize) {
         feed_iwdg();
     }
 
+    // Turn off the middle LED to show that we're done.
     pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
 }
 
+/// Sets up the simplest practical clock tree for full-speed operation.
 fn configure_clock_tree() {
+    // Our intent is to run the CPU and all peripherals at 48 MHz.
+    //
     // There is no external oscillator installed, so we need to use HSI through
     // a PLL to get 48 MHz.
     //
@@ -222,13 +268,18 @@ fn configure_clock_tree() {
     }
 }
 
+/// Configures all GPIOs from their reset states (high-impedance inputs) to the
+/// states required for this application.
+///
+/// This routine is also responsible for turning on clock to the GPIO ports, so
+/// it's important to call this before any GPIO manipulation.
 fn configure_gpios() {
     // Turn on clocks to the GPIO ports.
     pac::RCC.ahbenr().modify(|w| {
         w.set_gpioaen(true);
         w.set_gpioben(true);
     });
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     // GPIOA: pins PA2 and PA4 in analog mode.
     pac::GPIOA.moder().modify(|w| {
@@ -237,7 +288,6 @@ fn configure_gpios() {
     });
 
     // GPIOB: pins PB12, PB13, PB14 in push-pull fast output mode.
-    // Note: function of PB13 not currently understood.
     //
     // PB5 is initially an input with a pullup.
 
@@ -265,6 +315,8 @@ fn configure_gpios() {
 
 }
 
+/// Sets up DMA transfer from memory to the DAC. Also responsible for enabling
+/// the clock to the DMA controller.
 fn configure_dma() {
     // This implementation uses a single DMA channel. The F0 has probably the
     // simplest DMA implementation of the STM32 family, and in particular, has
@@ -278,7 +330,7 @@ fn configure_dma() {
     
     // Enable clock to the DMA controller.
     pac::RCC.ahbenr().modify(|w| w.set_dmaen(true));
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     let dma = pac::DMA1;
 
@@ -309,12 +361,14 @@ fn configure_dma() {
     }
 }
 
+/// Sets up the analog-to-digital converter, which we configure to free-running
+/// mode doing 12-bit conversions.
 fn configure_adc() {
     // Enable clock to the ADC.
     pac::RCC.apb2enr().modify(|w| {
         w.set_adcen(true);
     });
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     let adc = pac::ADC1;
 
@@ -357,12 +411,15 @@ fn configure_adc() {
     adc.cr().modify(|w| w.set_adstart(true));
 }
 
+/// Configures the DAC itself, which is responsible for driving DMA, and is in
+/// turn driven by TIM2 (so this won't do much if you don't also call
+/// `configure_sample_timer`).
 fn configure_dac() {
     // Enable clock to the DAC.
     pac::RCC.apb1enr().modify(|w| {
         w.set_dacen(true);
     });
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     let dac = pac::DAC1;
 
@@ -381,6 +438,7 @@ fn configure_dac() {
     dac.cr().modify(|w| w.set_en(0, true));
 }
 
+/// Configures TIM2 to drive the DAC to produce samples at our target rate.
 fn configure_sample_timer() {
     // This configures TIM2 to scan out our wavetable at `TARGET_FREQ`.
     //
@@ -396,7 +454,7 @@ fn configure_sample_timer() {
     
     // Enable clock to TIM2.
     pac::RCC.apb1enr().modify(|w| w.set_tim2en(true));
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    compiler_fence(Ordering::SeqCst);
 
     let tim = pac::TIM2;
     tim.arr().write_value(SETTING);
@@ -413,6 +471,8 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
+/// Sets up the Independent Watchdog to reset the processor if we hang, ensuring
+/// that we don't just sit there and blast the amp or bystanders.
 fn configure_iwdg() {
     // The IWDG is one of the only peripherals (along with RCC and FLASH) that
     // can be used _without_ having to enable its clock in RCC.
@@ -428,9 +488,11 @@ fn configure_iwdg() {
 
     // Perform the watchdog register unlock sequence.
     iwdg.kr().write(|w| w.set_key(Key::ENABLE));
+
     // Configure timing.
     iwdg.pr().write(|w| w.set_pr(pac::iwdg::vals::Pr::DIVIDE_BY4));
     iwdg.rlr().write(|w| w.set_rl(625));
+
     // Initialize the counter. Failing to do this here causes the watchdog to
     // start the first countdown from 0xFFF, giving us 409.5 ms of leniency on
     // boot. We don't need that.
@@ -440,6 +502,7 @@ fn configure_iwdg() {
     iwdg.kr().write(|w| w.set_key(Key::START));
 }
 
+/// Reloads the IWDG countdown timer, postponing our inevitable demise.
 fn feed_iwdg() {
     pac::IWDG.kr().write(|w| w.set_key(Key::RESET));
 }
