@@ -83,6 +83,7 @@ fn main() -> ! {
 
     // This needs to happen first:
     configure_clock_tree();
+    allow_watchdog_freeze_on_halt();
 
     // The order of these steps is essentially arbitrary, except that it's nice
     // to configure GPIO _after_ DAC so we don't briefly expose a nonsense
@@ -460,9 +461,7 @@ fn configure_dac() {
     dac.cr().write(|w| {
         // Disable output buffer.
         //
-        // TODO: it is not immediately clear to me from inspecting the PCB that
-        // this is necessary, or a good idea. Try it both ways and check
-        // linearity.
+        // This keeps us from overdriving the output stage.
         w.set_boff(0, true);
         // Enable external trigger.
         w.set_ten(0, true);
@@ -547,4 +546,17 @@ fn configure_iwdg() {
 /// Reloads the IWDG countdown timer, postponing our inevitable demise.
 fn feed_iwdg() {
     pac::IWDG.kr().write(|w| w.set_key(Key::RESET));
+}
+
+/// Halt the IWDG on debug halt. This makes it much easier to use a debugger.
+/// Yes, probe software can do this, and OpenOCD does, but then there's probe-rs
+/// which decided not to make anything configurable.
+fn allow_watchdog_freeze_on_halt() {
+    // Enable access to the DBGMCU unit.
+    pac::RCC.apb2enr().modify(|w| w.set_dbgmcuen(true));
+    compiler_fence(Ordering::SeqCst);
+
+    // Stop the watchdog on debug halt.
+    pac::DBGMCU.apb1_fz().modify(|w| w.set_iwdg(true));
+    // Note that we are _not_ freezing the DAC/TIM2 on halt.
 }
