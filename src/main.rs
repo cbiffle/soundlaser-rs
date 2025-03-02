@@ -81,22 +81,20 @@ fn DMA1_CHANNEL2_3() {
     let isr = pac::DMA1.isr().read();
 
     if isr.tcif(3 - 1) {
-        // DMA has just finished the second copy of the wavetable, so regenerate
-        // it.
-        regenerate_waveform(1);
         // Clear DMA CH1 TC flag.
         pac::DMA1.ifcr().write(|w| {
             w.set_tcif(3 - 1, true);
         });
-    }
-
-    if isr.htif(3 - 1) {
-        // DMA has just finished the _first_ copy of the wavetable.
-        regenerate_waveform(0);
+        // DMA has just finished the second copy of the wavetable, so regenerate
+        // it.
+        regenerate_waveform(1);
+    } else if isr.htif(3 - 1) {
         // Clear DMA CH1 TC flag.
         pac::DMA1.ifcr().write(|w| {
             w.set_htif(3 - 1, true);
         });
+        // DMA has just finished the _first_ copy of the wavetable.
+        regenerate_waveform(0);
     }
 }
 
