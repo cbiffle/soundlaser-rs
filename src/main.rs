@@ -106,7 +106,10 @@ fn regenerate_waveform(which: usize) {
     // Read the last sample.
     let sample = pac::ADC1.dr().read().data();
 
-    const ZERO_RANGE: Range<u16> = 0x76d..0x898;
+    // Size of band around zero that we treat as "quiet," for the purpose of
+    // suppressing the carrier signal.
+    const DEADZONE: u16 = 150;
+    const ZERO_RANGE: Range<u16> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
 
     let quiet_time_now = if !ZERO_RANGE.contains(&sample) {
         QUIET_TIME.store(0, Ordering::Relaxed);
