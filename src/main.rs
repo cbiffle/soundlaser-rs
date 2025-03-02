@@ -34,6 +34,17 @@ const TARGET_FREQ: u32 = 40_000;
 fn main() -> ! {
     let mut cp = cortex_m::Peripherals::take().unwrap();
 
+    // To avoid glitching the output to full-negative for one or two wave
+    // cycles, go ahead and initialize the wavetable.
+    //
+    // We could also write the `WAVETABLE` static with an initializer that sets
+    // this value, but that's _significantly_ larger in flash.
+    for half in &WAVETABLE {
+        for sample in half {
+            sample.store(0x7ff, Ordering::Relaxed);
+        }
+    }
+
     configure_clock_tree();
     configure_gpios();
     configure_adc();
@@ -366,7 +377,7 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
-static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0x7ff) }; WAVETABLE_SIZE as usize] }; 2];
+static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize] }; 2];
 
 static COEFFICIENTS: [u16; WAVETABLE_SIZE as usize / 2] = [
     0,
