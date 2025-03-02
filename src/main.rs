@@ -21,16 +21,26 @@
 #![no_std]
 #![no_main]
 
-use core::{ops::Range, sync::atomic::{compiler_fence, AtomicU16, AtomicU32, Ordering}};
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicU16, AtomicU32, Ordering, compiler_fence},
+};
 
 use panic_halt as _;
-use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, iwdg::vals::Key, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
+use stm32_metapac::{
+    self as pac,
+    flash::vals::Latency,
+    gpio::vals::{Moder, Ospeedr, Pupdr},
+    interrupt,
+    iwdg::vals::Key,
+    rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw},
+};
 
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/sine.rs"));
 }
-use generated::WAVETABLE_SIZE;
 use generated::COEFFICIENTS;
+use generated::WAVETABLE_SIZE;
 
 /// Intended carrier frequency for the ultrasonic wave. In practice, this will
 /// be approximated, though we'll get as close as we can.
@@ -190,11 +200,11 @@ fn regenerate_waveform(which: usize) {
         // applying different offsets from the midpoint.
         //
         // First, break the waveform table in half:
-        let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
+        let (pos_cycle, neg_cycle) =
+            WAVETABLE[which].split_at(COEFFICIENTS.len());
         // Now, process the two halves and the coefficient table in parallel.
-        for ((outp, outn), &coeff) in pos_cycle.iter()
-            .zip(neg_cycle)
-            .zip(&COEFFICIENTS)
+        for ((outp, outn), &coeff) in
+            pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS)
         {
             // Promote both sides to u32 so we can do a 16x16->32
             // multiplication, and then take the top half, divided by 2.
@@ -343,7 +353,6 @@ fn configure_gpios() {
         // This should be default at reset, but, hey
         w.set_moder(5, Moder::INPUT);
     });
-
 }
 
 /// Sets up DMA transfer from memory to the DAC. Also responsible for enabling
@@ -358,7 +367,7 @@ fn configure_dma() {
     // configured for M-2-P, MINC, circular. The DRQs to this channel are being
     // driven on the DAC DRQ, but the DAC is driving its DRQ in response to
     // TIM2 behind the scenes. See the timer setup routine for more.
-    
+
     // Enable clock to the DMA controller.
     pac::RCC.ahbenr().modify(|w| w.set_dmaen(true));
     compiler_fence(Ordering::SeqCst);
@@ -488,11 +497,11 @@ fn configure_sample_timer() {
     // Round the calculation to minimize error (computes a slightly different
     // carrier frequency than the original).
     const CYCLES_PER_SAMPLE: usize =
-        (CYCLES_PER_WAVE + WAVETABLE_SIZE/2) / WAVETABLE_SIZE;
+        (CYCLES_PER_WAVE + WAVETABLE_SIZE / 2) / WAVETABLE_SIZE;
     // The timer wants the period N set as ARR=N-1; compute N-1 at compile time
     // so the compiler will error out if we happen to underflow.
     const SETTING: u32 = (CYCLES_PER_SAMPLE - 1) as u32;
-    
+
     // Enable clock to TIM2.
     pac::RCC.apb1enr().modify(|w| w.set_tim2en(true));
     compiler_fence(Ordering::SeqCst);
@@ -531,7 +540,8 @@ fn configure_iwdg() {
     iwdg.kr().write(|w| w.set_key(Key::ENABLE));
 
     // Configure timing.
-    iwdg.pr().write(|w| w.set_pr(pac::iwdg::vals::Pr::DIVIDE_BY4));
+    iwdg.pr()
+        .write(|w| w.set_pr(pac::iwdg::vals::Pr::DIVIDE_BY4));
     iwdg.rlr().write(|w| w.set_rl(625));
 
     // Initialize the counter. Failing to do this here causes the watchdog to
