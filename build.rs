@@ -4,11 +4,15 @@ fn main() {
     println!("cargo::rerun-if-changed=memory.x");
 
     // Compute our fixed-point half-cycle of a sine wave.
+    //
+    // We use a slightly weird fixed-point scheme where 1.0 is represented
+    // bitwise as 65535. This makes range analysis significantly easier in the
+    // firmware.
     let half_wavetable_size = 16u16;
     let mut samples = vec![];
     for i in 0..half_wavetable_size {
         let x = f64::from(i) * std::f64::consts::PI / f64::from(half_wavetable_size);
-        let sample = (x.sin() * 32768.).round() as u16;
+        let sample = (x.sin() * 65535.).round() as u16;
         samples.push(sample);
     }
 

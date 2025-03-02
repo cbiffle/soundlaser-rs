@@ -56,7 +56,7 @@ fn main() -> ! {
     //
     // Yes, this arguably duplicates the setup done before `main`. We could have
     // written `WAVETABLE` with an initializer that sets each element to
-    // `0x7ff`. However, because memory initialization in rustc/llvm is pretty
+    // `0x8000`. However, because memory initialization in rustc/llvm is pretty
     // naive, this produces a complete initialized copy of `WAVETABLE` in flash
     // at a cost of (currently) 256 bytes.
     //
@@ -64,7 +64,7 @@ fn main() -> ! {
     // cheaper (about 25% the cost).
     for half in &WAVETABLE {
         for sample in half {
-            sample.store(0x7ff, Ordering::Relaxed);
+            sample.store(0x8000, Ordering::Relaxed);
         }
     }
 
@@ -143,8 +143,8 @@ fn DMA1_CHANNEL2_3() {
 fn regenerate_waveform(which: usize) {
     // Size of band around zero that we treat as "quiet," for the purpose of
     // suppressing the carrier signal.
-    const DEADZONE: u32 = 150;
-    const ZERO_RANGE: Range<u32> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
+    const DEADZONE: u32 = 2400;
+    const ZERO_RANGE: Range<u32> = 0x8000 - DEADZONE..0x8000 + DEADZONE;
 
     // We update this variable each time through the routine, to keep track of
     // how long the input has been "quiet."
@@ -157,6 +157,8 @@ fn regenerate_waveform(which: usize) {
     // Read the most recent ADC sample. The ADC updates at around 144 kHz, so
     // this will be at most 6.94 µs old. (We produce one cycle of output every
     // 25 µs so this is "recent enough.")
+    //
+    // Note that this is a left-aligned 12-bit sample (0..=0xFFF0).
     let sample = pac::ADC1.dr().read().data() as u32;
 
     // Increment our quiet-time counter if the sample is close to the midpoint.
@@ -180,15 +182,29 @@ fn regenerate_waveform(which: usize) {
             .zip(&COEFFICIENTS)
         {
             // Promote both sides to u32 so we can do a 16x16->32
-            // multiplication, and then take the top half.
-            let x = (sample * u32::from(coeff)) >> 16;
-            // Generate two samples on opposite sides of our midpoint. Note:
-            // doing the midpoint-offset math before truncating to 16 bits
-            // improves the compiler's ability to reason about overflow in the
-            // addition, since it doesn't take the range of the COEFFICIENTS
-            // table into account.
-            outp.store((0x7ff + x) as u16, Ordering::Relaxed);
-            outn.store((0x7ff - x) as u16, Ordering::Relaxed);
+            // multiplication, and then take the top half, divided by 2.
+            //
+            // We could remove the "divided by 2" part by halving the values in
+            // the COEFFICIENTS table, but using the full range of u16 makes the
+            // range analysis easier on the compiler, and "top half" and "top
+            // half divided by 2" are the same cost on ARMv6-M.
+            let x = ((sample * u32::from(coeff)) >> 17) as u16;
+
+            // Range of x:
+            //
+            // - coeff is in the range 0..=0xFFFF (by definition of u16)
+            // - sample is in the range 0..=0xFFF0 (12-bit left-aligned)
+            // - (coeff * sample) is thus in the range 0..=0xfffe_0001
+            // - thus x is in the range 0..=0x7fff.
+            //
+            // Since we're relying on the ranges of the types, and not the
+            // specific values of the COEFFICIENTS table, the compiler
+            // recognizes this and the addition/subtraction below do not
+            // generate overflow checks.
+
+            // Generate two samples on opposite sides of our midpoint.
+            outp.store(0x8000 + x, Ordering::Relaxed);
+            outn.store(0x8000 - x, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights to show that we're producing
         // a carrier.
@@ -199,7 +215,7 @@ fn regenerate_waveform(which: usize) {
     } else {
         // Blank the stored waveform to stop producing a carrier.
         for sample in &WAVETABLE[which] {
-            sample.store(0x7ff, Ordering::Relaxed);
+            sample.store(0x8000, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
@@ -347,7 +363,8 @@ fn configure_dma() {
         });
         // We stream out both copies of the wavetable.
         ch3.ndtr().write(|w| w.set_ndt(generated::DMA_SIZE));
-        ch3.par().write_value(pac::DAC1.dhr12r(0).as_ptr() as u32);
+        // Note that we're choosing the left-aligned version here.
+        ch3.par().write_value(pac::DAC1.dhr12l(0).as_ptr() as u32);
         ch3.mar().write_value(WAVETABLE.as_ptr() as u32);
 
         // Enable both the half-transfer and transfer-complete interrupts.
@@ -375,9 +392,12 @@ fn configure_adc() {
     adc.cfgr1().modify(|w| {
         // Continuous conversion
         w.set_cont(true);
+        // Left-align the 12-bit sample in the 16-bit field, producing a value
+        // in the range 0..=0xFFF0. This makes some math downstream more
+        // convenient.
+        w.set_align(pac::adc::vals::Align::LEFT);
 
         // Defaults restated here for clarity.
-        w.set_align(pac::adc::vals::Align::RIGHT);
         w.set_res(pac::adc::vals::Res::BITS12);
     });
 
