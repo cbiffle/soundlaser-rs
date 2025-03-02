@@ -240,10 +240,6 @@ fn configure_dma() {
         let ch1 = dma.ch(0 /* 1 - 1 */);
         ch1.cr().write(|w| {
             w.set_dir(pac::bdma::vals::Dir::FROM_PERIPHERAL);
-            // Oddly, the original firmware sets MINC. But the channel is set
-            // circular, so this doesn't matter. We'll reproduce this for now
-            // (TODO).
-            w.set_minc(true);
             w.set_pinc(false);
             w.set_msize(pac::bdma::vals::Size::BITS16);
             w.set_psize(pac::bdma::vals::Size::BITS16);
@@ -305,9 +301,6 @@ fn configure_adc() {
         w.set_dmacfg(pac::adc::vals::Dmacfg::CIRCULAR);
         // Continuous conversion
         w.set_cont(true);
-        // Weirdly, the original firmware sets scan direction to backwards,
-        // despite enabling only a single channel. TODO: try removing
-        w.set_scandir(pac::adc::vals::Scandir::BACKWARD);
 
         // Defaults restated here for clarity.
         w.set_align(pac::adc::vals::Align::RIGHT);
