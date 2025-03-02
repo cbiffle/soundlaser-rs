@@ -34,7 +34,7 @@ use generated::COEFFICIENTS;
 
 /// Intended carrier frequency for the ultrasonic wave. In practice, this will
 /// be approximated, though we'll get as close as we can.
-const TARGET_FREQ: usize = 40_000;
+const CARRIER_FREQ: usize = 40_000;
 
 /// CPU frequency in Hz. If you change this, you must update the
 /// `configure_clock_tree` routine to match, or you'll get the wrong output
@@ -385,7 +385,7 @@ fn configure_sample_timer() {
     // This configures TIM2 to scan out our wavetable at `TARGET_FREQ`.
     //
     // TIM2's input clock is the same as `CPU_FREQ` in our configuration.
-    const CYCLES_PER_WAVE: usize = CPU_FREQ / TARGET_FREQ;
+    const CYCLES_PER_WAVE: usize = CPU_FREQ / CARRIER_FREQ;
     // Round the calculation to minimize error (computes a slightly different
     // carrier frequency than the original).
     const CYCLES_PER_SAMPLE: usize =
