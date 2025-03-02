@@ -268,12 +268,8 @@ fn configure_dma() {
         });
         // We stream out both copies of the wavetable.
         ch3.ndtr().write(|w| w.set_ndt(WAVETABLE_SIZE * 2));
-        ch3.par().write(|w| {
-            *w = pac::DAC1.dhr12r(0).as_ptr() as u32;
-        });
-        ch3.mar().write(|w| {
-            *w = WAVETABLE.as_ptr() as u32;
-        });
+        ch3.par().write_value(pac::DAC1.dhr12r(0).as_ptr() as u32);
+        ch3.mar().write_value(WAVETABLE.as_ptr() as u32);
 
         // Enable both the half-transfer and transfer-complete interrupts.
         ch3.cr().modify(|w| {
@@ -364,8 +360,8 @@ fn configure_sample_timer() {
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
     let tim = pac::TIM2;
-    tim.arr().write(|w| *w = SETTING);
-    tim.psc().write(|w| *w = 0);
+    tim.arr().write_value(SETTING);
+    tim.psc().write_value(0);
     // Force double-buffered registers to be applied.
     tim.egr().write(|w| w.set_ug(true));
     // Generate TRGO on UPDATE events (excluding the fake one we just generated)
