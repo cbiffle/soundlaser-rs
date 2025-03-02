@@ -362,7 +362,7 @@ fn configure_sample_timer() {
     // This configures TIM2 to scan out our wavetable at roughly 44 kHz.
     //
     // TIM2's input clock is PCLK, which we've set to SYSCLK, which is 48 MHz.
-    const DIVISOR: u32 = (48_000_000 / WAVETABLE_SIZE as u32 + TARGET_FREQ/2) / TARGET_FREQ;
+    const DIVISOR: u32 = (48_000_000 / WAVETABLE_SIZE as u32 /* + TARGET_FREQ/2*/) / TARGET_FREQ;
     const SETTING: u32 = DIVISOR - 1; // ensure it's non-zero at compile time.
     
     // Enable clock to TIM2.
