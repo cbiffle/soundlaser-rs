@@ -24,7 +24,7 @@
 use core::{ops::Range, sync::atomic::{AtomicU16, AtomicU32, Ordering}};
 
 use panic_halt as _;
-use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
+use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, iwdg::vals::Key, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
 
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/sine.rs"));
@@ -69,7 +69,12 @@ fn main() -> ! {
     configure_dac();
     configure_dma();
 
-    // TODO setup IWDG
+    if !cfg!(feature = "disable-iwdg") {
+        // Start the watchdog. At this point if we don't start generating
+        // waveforms soon, we will reset. (The watchdog is fed from the DMA
+        // progress ISR.)
+        configure_iwdg();
+    }
 
     // Unmask our DMA interrupt, which is where most of the actual behavior is
     // implemented.
@@ -161,7 +166,10 @@ fn regenerate_waveform(which: usize) {
         });
     }
 
-    // TODO feed IWDG
+    if !cfg!(feature = "disable-iwdg") {
+        // Reassure the watchdog timer that we're making forward progress.
+        feed_iwdg();
+    }
 
     pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
 }
@@ -403,4 +411,35 @@ fn configure_sample_timer() {
     });
     // Enable the timer.
     tim.cr1().write(|w| w.set_cen(true));
+}
+
+fn configure_iwdg() {
+    // The IWDG is one of the only peripherals (along with RCC and FLASH) that
+    // can be used _without_ having to enable its clock in RCC.
+    let iwdg = pac::IWDG;
+
+    // The original firmware set the IWDG with a prescaler of 4 and a period of
+    // 625. The IWDG is clocked from the LSI oscillator, at a speed of about 40
+    // kHz. That gives it a timeout of 62.5 ms.
+    //
+    // This seems absurdly high, given that under normal operation the original
+    // firmware feeds the watchdog at 144 kHz. This implementation feeds the
+    // watchdog once per output cycle, or about 40 kHz.
+
+    // Perform the watchdog register unlock sequence.
+    iwdg.kr().write(|w| w.set_key(Key::ENABLE));
+    // Configure timing.
+    iwdg.pr().write(|w| w.set_pr(pac::iwdg::vals::Pr::DIVIDE_BY4));
+    iwdg.rlr().write(|w| w.set_rl(625));
+    // Initialize the counter. Failing to do this here causes the watchdog to
+    // start the first countdown from 0xFFF, giving us 409.5 ms of leniency on
+    // boot. We don't need that.
+    iwdg.kr().write(|w| w.set_key(Key::RESET));
+    // And start the watchdog. This operation cannot be reversed (without a
+    // reset).
+    iwdg.kr().write(|w| w.set_key(Key::START));
+}
+
+fn feed_iwdg() {
+    pac::IWDG.kr().write(|w| w.set_key(Key::RESET));
 }
