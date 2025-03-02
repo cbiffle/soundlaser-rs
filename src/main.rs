@@ -106,7 +106,7 @@ fn DMA1_CHANNEL1() {
     } else {
         // Blank the stored waveform.
         for sample in &WAVETABLE {
-            sample.store(0, Ordering::Relaxed);
+            sample.store(0x7ff, Ordering::Relaxed);
         }
         // Shut off DAC DRQ generation.
         pac::DAC1.cr().modify(|w| w.set_dmaen(0, false));
