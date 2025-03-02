@@ -68,8 +68,14 @@ fn main() -> ! {
         }
     }
 
-    // Hardware initialization:
-    let mut cp = cortex_m::Peripherals::take().unwrap();
+    // Hardware initialization: "steal" the peripherals to defeat cortex_m's
+    // ownership model. This avoids a bunch of code generated for no reason.
+    //
+    // Safety: so tbh the cortex_m crate abuses the definition of safety here to
+    // enforce its own ideas about peripheral use. That being said, this is even
+    // safe in their sense of the term, because it happens exactly once at the
+    // top of main.
+    let mut cp = unsafe { cortex_m::Peripherals::steal() };
 
     // This needs to happen first:
     configure_clock_tree();
