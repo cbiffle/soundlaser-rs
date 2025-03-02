@@ -26,8 +26,18 @@ use core::{ops::Range, sync::atomic::{AtomicU16, AtomicU32, Ordering}};
 use panic_halt as _;
 use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
 
-const WAVETABLE_SIZE: u16 = 32;
+/// Number of samples per cycle in our wavetable. If you change this, you'll
+/// need to recompute the sine wave `COEFFICIENTS` at the end of this file.
+const WAVETABLE_SIZE: u32 = 32;
+
+/// Intended carrier frequency for the ultrasonic wave. In practice, this will
+/// be approximated, though we'll get as close as we can.
 const TARGET_FREQ: u32 = 40_000;
+
+/// CPU frequency in Hz. If you change this, you must update the
+/// `configure_clock_tree` routine to match, or you'll get the wrong output
+/// frequency.
+const CPU_FREQ: u32 = 48_000_000;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -267,7 +277,7 @@ fn configure_dma() {
             w.set_pl(pac::bdma::vals::Pl::HIGH);
         });
         // We stream out both copies of the wavetable.
-        ch3.ndtr().write(|w| w.set_ndt(WAVETABLE_SIZE * 2));
+        ch3.ndtr().write(|w| w.set_ndt(u16::try_from(WAVETABLE_SIZE).unwrap() * 2));
         ch3.par().write_value(pac::DAC1.dhr12r(0).as_ptr() as u32);
         ch3.mar().write_value(WAVETABLE.as_ptr() as u32);
 
@@ -338,7 +348,8 @@ fn configure_dac() {
         w.set_boff(0, true);
         // Enable external trigger.
         w.set_ten(0, true);
-        // Source external trigger from TIM2 TRGO
+        // Source external trigger from TIM2 TRGO. This is how the DMA gets
+        // driven from TIM2.
         w.set_tsel(0, 0b100);
         // Enable DRQ generation.
         w.set_dmaen(0, true);
@@ -350,10 +361,15 @@ fn configure_dac() {
 fn configure_sample_timer() {
     // This configures TIM2 to scan out our wavetable at `TARGET_FREQ`.
     //
-    // TIM2's input clock is PCLK, which we've set to SYSCLK, which is 48 MHz.
-    const DIVISOR: u32 = (48_000_000 / WAVETABLE_SIZE as u32 + TARGET_FREQ/2)
-        / TARGET_FREQ;
-    const SETTING: u32 = DIVISOR - 1; // ensure it's non-zero at compile time.
+    // TIM2's input clock is the same as `CPU_FREQ` in our configuration.
+    const CYCLES_PER_WAVE: u32 = CPU_FREQ / TARGET_FREQ;
+    // Round the calculation to minimize error (computes a slightly different
+    // carrier frequency than the original).
+    const CYCLES_PER_SAMPLE: u32 =
+        (CYCLES_PER_WAVE + WAVETABLE_SIZE/2) / WAVETABLE_SIZE;
+    // The timer wants the period N set as ARR=N-1; compute N-1 at compile time
+    // so the compiler will error out if we happen to underflow.
+    const SETTING: u32 = CYCLES_PER_SAMPLE - 1;
     
     // Enable clock to TIM2.
     pac::RCC.apb1enr().modify(|w| w.set_tim2en(true));
@@ -364,7 +380,9 @@ fn configure_sample_timer() {
     tim.psc().write_value(0);
     // Force double-buffered registers to be applied.
     tim.egr().write(|w| w.set_ug(true));
-    // Generate TRGO on UPDATE events (excluding the fake one we just generated)
+    // Generate TRGO on UPDATE events (excluding the fake one we just
+    // generated). This is the signal that the DAC will respond to; see the DAC
+    // configuration.
     tim.cr2().write(|w| {
         w.set_mms(stm32_metapac::timer::vals::Mms::UPDATE);
     });
@@ -372,8 +390,11 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
-static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU16::new(0) }; WAVETABLE_SIZE as usize] }; 2];
+/// Our RAM wavetable buffer, filled in from the DMA ISR.
+static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE as usize]; 2] =
+    [const { [const { AtomicU16::new(0) }; WAVETABLE_SIZE as usize] }; 2];
 
+/// Fixed-point 16.16 samples from one half of a sine wave cycle.
 static COEFFICIENTS: [u16; WAVETABLE_SIZE as usize / 2] = [
     0,
     (1 << (16 - 4)) + (1 << (16 - 5)) + (1 << (16 - 8)),
