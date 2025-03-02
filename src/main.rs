@@ -21,8 +21,7 @@
 #![no_std]
 #![no_main]
 
-use core::{ops::Range, sync::atomic::Ordering};
-use portable_atomic::AtomicU32;
+use core::{ops::Range, sync::atomic::{AtomicU16, AtomicU32, Ordering}};
 
 use panic_halt as _;
 use stm32_metapac::{self as pac, flash::vals::Latency, gpio::vals::{Moder, Ospeedr, Pupdr}, interrupt, rcc::vals::{Hpre, Pllmul, Pllsrc, Ppre, Sw}};
@@ -104,12 +103,12 @@ fn regenerate_waveform(which: usize) {
     static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
 
     // Read the last sample.
-    let sample = pac::ADC1.dr().read().data();
+    let sample = pac::ADC1.dr().read().data() as u32;
 
     // Size of band around zero that we treat as "quiet," for the purpose of
     // suppressing the carrier signal.
-    const DEADZONE: u16 = 150;
-    const ZERO_RANGE: Range<u16> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
+    const DEADZONE: u32 = 150;
+    const ZERO_RANGE: Range<u32> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
 
     let quiet_time_now = if !ZERO_RANGE.contains(&sample) {
         0
@@ -120,12 +119,11 @@ fn regenerate_waveform(which: usize) {
 
     if quiet_time_now < 0x1200 {
         // Update the waveform.
-        let sample = u32::from(sample);
         let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
         for ((outp, outn), &coeff) in pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS) {
             let x = (sample * u32::from(coeff)) >> 16;
-            outp.store(0x7ff + x, Ordering::Relaxed);
-            outn.store(0x7ff_u32 - x, Ordering::Relaxed);
+            outp.store((0x7ff + x) as u16, Ordering::Relaxed);
+            outn.store((0x7ff - x) as u16, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
@@ -263,7 +261,7 @@ fn configure_dma() {
             w.set_dir(pac::bdma::vals::Dir::FROM_MEMORY);
             w.set_minc(true);
             w.set_pinc(false);
-            w.set_msize(pac::bdma::vals::Size::BITS32);
+            w.set_msize(pac::bdma::vals::Size::BITS16);
             w.set_psize(pac::bdma::vals::Size::BITS32);
             w.set_circ(true);
             w.set_pl(pac::bdma::vals::Pl::HIGH);
@@ -378,7 +376,7 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
-static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize] }; 2];
+static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU16::new(0) }; WAVETABLE_SIZE as usize] }; 2];
 
 static COEFFICIENTS: [u16; WAVETABLE_SIZE as usize / 2] = [
     0,
