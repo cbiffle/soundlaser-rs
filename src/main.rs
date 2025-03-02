@@ -366,7 +366,7 @@ fn configure_sample_timer() {
     tim.cr1().write(|w| w.set_cen(true));
 }
 
-static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0) }; WAVETABLE_SIZE as usize] }; 2];
+static WAVETABLE: [[AtomicU32; WAVETABLE_SIZE as usize]; 2] = [const { [const { AtomicU32::new(0x7ff) }; WAVETABLE_SIZE as usize] }; 2];
 
 static COEFFICIENTS: [u16; WAVETABLE_SIZE as usize / 2] = [
     0,
