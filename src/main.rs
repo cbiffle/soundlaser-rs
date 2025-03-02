@@ -90,7 +90,7 @@ fn main() -> ! {
         // output-disable function. I have not reproduced this here because it's
         // weird.
 
-        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        cortex_m::asm::wfi();
     }
 }
 
