@@ -425,6 +425,10 @@ fn configure_dac() {
 
     dac.cr().write(|w| {
         // Disable output buffer.
+        //
+        // TODO: it is not immediately clear to me from inspecting the PCB that
+        // this is necessary, or a good idea. Try it both ways and check
+        // linearity.
         w.set_boff(0, true);
         // Enable external trigger.
         w.set_ten(0, true);
