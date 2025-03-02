@@ -41,6 +41,10 @@ const CARRIER_FREQ: usize = 40_000;
 /// frequency.
 const CPU_FREQ: usize = 48_000_000;
 
+/// The middle of the ADC and DAC ranges, used as the "zero" point for incoming
+/// and outgoing waves. Do not change this, it's intrinsic.
+const MIDPOINT: u16 = (u16::MAX / 2) + 1;
+
 /// Our RAM wavetable buffer, filled in from the DMA ISR. We have two copies of
 /// the wavetable so we can update one while the other is streaming. This uses
 /// atomics to ensure that all accesses avoid tearing when racing DMA. It also
@@ -56,15 +60,15 @@ fn main() -> ! {
     //
     // Yes, this arguably duplicates the setup done before `main`. We could have
     // written `WAVETABLE` with an initializer that sets each element to
-    // `0x8000`. However, because memory initialization in rustc/llvm is pretty
-    // naive, this produces a complete initialized copy of `WAVETABLE` in flash
-    // at a cost of (currently) 256 bytes.
+    // `MIDPOINT`. However, because memory initialization in rustc/llvm is
+    // pretty naive, this produces a complete initialized copy of `WAVETABLE` in
+    // flash at a cost of (currently) 256 bytes.
     //
     // Leaving it in .bss and initializing it with a loop is dramatically
     // cheaper (about 25% the cost).
     for half in &WAVETABLE {
         for sample in half {
-            sample.store(0x8000, Ordering::Relaxed);
+            sample.store(MIDPOINT, Ordering::Relaxed);
         }
     }
 
@@ -80,10 +84,12 @@ fn main() -> ! {
     // This needs to happen first:
     configure_clock_tree();
 
-    // The order of these steps is essentially arbitrary.
+    // The order of these steps is essentially arbitrary, except that it's nice
+    // to configure GPIO _after_ DAC so we don't briefly expose a nonsense
+    // value, but _before_ ADC so it doesn't see a floating value.
+    configure_dac();
     configure_gpios();
     configure_adc();
-    configure_dac();
     configure_dma();
 
     // This should happen after any initialization that might spin (e.g. ADC
@@ -149,8 +155,8 @@ fn DMA1_CHANNEL2_3() {
 fn regenerate_waveform(which: usize) {
     // Size of band around zero that we treat as "quiet," for the purpose of
     // suppressing the carrier signal.
-    const DEADZONE: u32 = 2400;
-    const ZERO_RANGE: Range<u32> = 0x8000 - DEADZONE..0x8000 + DEADZONE;
+    const DEADZONE: u16 = 2400;
+    const ZERO_RANGE: Range<u16> = MIDPOINT - DEADZONE..MIDPOINT + DEADZONE;
 
     // We update this variable each time through the routine, to keep track of
     // how long the input has been "quiet."
@@ -165,7 +171,7 @@ fn regenerate_waveform(which: usize) {
     // 25 µs so this is "recent enough.")
     //
     // Note that this is a left-aligned 12-bit sample (0..=0xFFF0).
-    let sample = pac::ADC1.dr().read().data() as u32;
+    let sample = pac::ADC1.dr().read().data();
 
     // Increment our quiet-time counter if the sample is close to the midpoint.
     let quiet_time_now = if !ZERO_RANGE.contains(&sample) {
@@ -176,6 +182,8 @@ fn regenerate_waveform(which: usize) {
     QUIET_TIME.store(quiet_time_now, Ordering::Relaxed);
 
     if quiet_time_now < 0x1200 {
+        let sample = u32::from(sample);
+
         // Update the waveform. Since we're generating a sine wave, the two
         // halves are symmetrical, and we can generate them at the same time by
         // applying different offsets from the midpoint.
@@ -209,8 +217,8 @@ fn regenerate_waveform(which: usize) {
             // generate overflow checks.
 
             // Generate two samples on opposite sides of our midpoint.
-            outp.store(0x8000 + x, Ordering::Relaxed);
-            outn.store(0x8000 - x, Ordering::Relaxed);
+            outp.store(MIDPOINT + x, Ordering::Relaxed);
+            outn.store(MIDPOINT - x, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights to show that we're producing
         // a carrier.
@@ -221,7 +229,7 @@ fn regenerate_waveform(which: usize) {
     } else {
         // Blank the stored waveform to stop producing a carrier.
         for sample in &WAVETABLE[which] {
-            sample.store(0x8000, Ordering::Relaxed);
+            sample.store(MIDPOINT, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
         pac::GPIOB.bsrr().write(|w| {
@@ -466,6 +474,10 @@ fn configure_dac() {
     });
     // Enable it.
     dac.cr().modify(|w| w.set_en(0, true));
+    // Initialize the output to the midpoint value. The reference manual is
+    // ambiguous on whether this can be done before the channel is enabled, so
+    // we'll do it after, even though that implies a very brief output glitch.
+    dac.dhr12l(0).write(|w| w.set_dhr(MIDPOINT));
 }
 
 /// Configures TIM2 to drive the DAC to produce samples at our target rate.
