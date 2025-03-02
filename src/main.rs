@@ -112,11 +112,11 @@ fn regenerate_waveform(which: usize) {
     const ZERO_RANGE: Range<u16> = 0x7ff - DEADZONE..0x7ff + DEADZONE;
 
     let quiet_time_now = if !ZERO_RANGE.contains(&sample) {
-        QUIET_TIME.store(0, Ordering::Relaxed);
         0
     } else {
-        QUIET_TIME.fetch_add(1, Ordering::Relaxed)
+        QUIET_TIME.load(Ordering::Relaxed).saturating_add(1)
     };
+    QUIET_TIME.store(quiet_time_now, Ordering::Relaxed);
 
     if quiet_time_now < 0x1200 {
         // Update the waveform.
