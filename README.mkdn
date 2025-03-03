@@ -1,0 +1,96 @@
+# `soundlaser-rs`
+
+Alternate, open-source firmware for a cheap sound-from-ultrasound directional
+speaker (or "soundlaser").
+
+## Warning
+
+These devices can produce loud 40 kHz ultrasound. Some studies have shown
+hearing damage from repeated or long-term exposure to sound in this band; some
+have shown no effect. Keep the volume as low as reasonable, wear hearing
+protection when hacking on the board, and try to operate the system outside.
+
+This reimplementation of the firmware reduces the output level by 50% by
+default, and has a configurable parameter to reduce it further. This should make
+it somewhat safer, but you should still be careful.
+
+## Target system
+
+This firmware targets directional ultrasonic speakers that look like this:
+
+![A photo of the speaker in question](example.jpg)
+
+Specifically, versions that use an STM32F051 microcontroller on the control PCB.
+Other versions may exist, and it's hard to tell from a product listing what
+you'll get.
+
+## About this firmware in particular
+
+This firmware reimplements the functionality of the original device, just
+smaller, faster, and in Rust. There are some differences:
+
+- The output defaults to 50% power, because the hardware's capable of somewhat
+  absurd power levels.
+
+- This version is open source and you can change how it behaves, including
+  turning the output back up if you know what you're doing.
+
+- It's also significantly simpler (the original used extra DMA channels that
+  aren't necessary) and faster (75% of the CPU is now free, in case you want to
+  do something weird with it).
+
+- I fixed a bunch of bugs with uninitialized memory, integer overflows, and the
+  like. (For instance, the stock firmware emits a loud chirp after 8 hours 17
+  minutes of silence, due to an integer overflow. This firmware does not.)
+
+- In the original, two pins that aren't hooked up (PB3 and PB5) can be used to
+  interrupt the output. (One of them appears to be related to the Bluetooth
+  module, which isn't installed on my board.) Since they're not hooked up, I
+  could not test this behavior, so I didn't reimplement it.
+
+Since the source code for the original firmware was unavailable, I analyzed the
+PCB, managed to extract the original firmware image, and then pored over it in
+Ghidra until I understood exactly what it was doing. Then I wrote a replacement.
+
+## Getting access to the debug port
+
+Near the microcontroller on the control board, there is a small 4-pin footprint:
+
+![Microscope photo of the debug connector](debug-connector.jpg)
+
+This was probably used with a pogo pin jig to flash the chip during
+manufacturing. You'll need to solder wires to it. (Or make a pogo pin jig, if
+you're excited about doing that.)
+
+Note that this photo is taken from the component-side of the board (as indicated
+by the presence of, well, components).
+
+## Building and flashing the firmware
+
+You need to have two things installed:
+
+- A Rust toolchain managed by `rustup`.
+- A reasonably recent version of the [probe-rs tools]. (Tested using 0.27.)
+
+Connect an STLink or other compatible debug probe to the board (and your
+computer) using the hacked-up arrangement from the previous section.
+
+In a clone of this repository, run:
+
+```
+cargo run --release
+```
+
+This will
+
+- Get the version of the Rust toolchain that this firmware was tested with
+- Ensure that the ARMv6-M (Cortex-M0) target is installed
+- Build the firmware with optimizations
+- Use the STLink to flash it to the micro
+- Start the firmware
+- Hang for no good reason
+
+To fix that last point, hit ^C. (If anyone knows of a command line flag to get
+it to stop doing this, I'm in the market.)
+
+[probe-rs tools]: https://probe.rs/docs/getting-started/installation/
