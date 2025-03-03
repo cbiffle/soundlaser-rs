@@ -10,7 +10,7 @@ hearing damage from repeated or long-term exposure to sound in this band; some
 have shown no effect. Keep the volume as low as reasonable, wear hearing
 protection when hacking on the board, and try to operate the system outside.
 
-This reimplementation of the firmware reduces the output level by 50% by
+This reimplementation of the firmware reduces the output level to 25% by
 default, and has a configurable parameter to reduce it further. This should make
 it somewhat safer, but you should still be careful.
 
@@ -29,8 +29,13 @@ you'll get.
 This firmware reimplements the functionality of the original device, just
 smaller, faster, and in Rust. There are some differences:
 
-- The output defaults to 50% power, because the hardware's capable of somewhat
+- The output defaults to 25% power, because the hardware's capable of somewhat
   absurd power levels.
+
+- I've changed the role of the LEDs. The (previously unused) Green LED is now
+  lit if the device is "safe" (i.e. not emitting a carrier). It switches to the
+  Red LED if the device is emitting (the "be careful" mode). The blue LED is
+  used for internal diagnostics and is lit at about 30% brightness in practice.
 
 - This version is open source and you can change how it behaves, including
   turning the output back up if you know what you're doing.

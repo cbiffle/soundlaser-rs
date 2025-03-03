@@ -12,8 +12,12 @@
 //! Ultrasound output should be delivered to PA4 (DAC_OUT1) (same scale). The
 //! transducers work best around 40 kHz.
 //!
-//! PB12, PB13, and PB14 are wired to indicator LEDs, active high. The stock
-//! firmware does not use the LED on PB13, but it does work.
+//! PB12, PB13, and PB14 are wired to indicator LEDs, active high. (The stock
+//! firmware does not use the LED on PB13, but it does work.)
+//!
+//! - PB12: blue
+//! - PB13: green
+//! - PB14: red
 //!
 //! PB3 and PB5 have mysterious functions I don't understand yet. PB3 does not
 //! appear to be routed, PB5 is routed to what appears to be a footprint for a
@@ -96,7 +100,9 @@ use stm32_metapac::{
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/sine.rs"));
 }
+// Generated table containing half a cycle of sine wave:
 use generated::COEFFICIENTS;
+// Number of samples in a full cycle of sine wave:
 use generated::WAVETABLE_SIZE;
 
 /// Intended carrier frequency for the ultrasonic wave. In practice, this will
@@ -112,9 +118,12 @@ const CPU_FREQ: usize = 48_000_000;
 /// Attenuation to apply to the carrier (and thus all sound output), in powers
 /// of 2.
 ///
-/// A value of 0 uses full output power (not recommended), 1 cuts the power to
-/// 50%, 2 cuts it to 25%, and so forth.
-const ATTENUATION: u32 = 1;
+/// 0 = 1/1x = full power (not recommended)
+/// 1 = 1/2x = 50% power
+/// 2 = 1/4x = 25% power
+/// 3 = 1/8x = 12.5% power
+/// ...and so on.
+const ATTENUATION: u32 = 2;
 
 /// The middle of the ADC and DAC ranges, used as the "zero" point for incoming
 /// and outgoing waves. Do not change this, it's intrinsic.
@@ -241,9 +250,9 @@ fn regenerate_waveform(which: usize) {
     // how long the input has been "quiet."
     static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
 
-    // Light the middle LED to help indicate how much CPU time is being spent
+    // Light the indicator LED to help indicate how much CPU time is being spent
     // doing this.
-    pac::GPIOB.bsrr().write(|w| w.set_bs(13, true));
+    set_diagnostic_led(true);
 
     // Read the most recent ADC sample. The ADC updates at around 144 kHz, so
     // this will be at most 6.94 µs old. (We produce one cycle of output every
@@ -301,20 +310,14 @@ fn regenerate_waveform(which: usize) {
         }
         // Switch the state of the indicator lights to show that we're producing
         // a carrier.
-        pac::GPIOB.bsrr().write(|w| {
-            w.set_bs(12, true);
-            w.set_br(14, true);
-        });
+        set_warning_led(true);
     } else {
         // Blank the stored waveform to stop producing a carrier.
         for sample in &WAVETABLE[which] {
             sample.store(MIDPOINT, Ordering::Relaxed);
         }
         // Switch the state of the indicator lights.
-        pac::GPIOB.bsrr().write(|w| {
-            w.set_br(12, true);
-            w.set_bs(14, true);
-        });
+        set_warning_led(false);
     }
 
     if !cfg!(feature = "disable-iwdg") {
@@ -322,8 +325,7 @@ fn regenerate_waveform(which: usize) {
         feed_iwdg();
     }
 
-    // Turn off the middle LED to show that we're done.
-    pac::GPIOB.bsrr().write(|w| w.set_br(13, true));
+    set_diagnostic_led(false);
 }
 
 /// Sets up the simplest practical clock tree for full-speed operation.
@@ -637,4 +639,23 @@ fn allow_watchdog_freeze_on_halt() {
     // Stop the watchdog on debug halt.
     pac::DBGMCU.apb1_fz().modify(|w| w.set_iwdg(true));
     // Note that we are _not_ freezing the DAC/TIM2 on halt.
+}
+
+fn set_diagnostic_led(state: bool) {
+    // Light the BLUE LED on PB12.
+    pac::GPIOB.bsrr().write(|w| {
+        w.set_bs(12, state);
+        w.set_br(12, !state);
+    });
+}
+
+fn set_warning_led(emitting: bool) {
+    // Extinguish the GREEN LED and light the RED LED.
+    pac::GPIOB.bsrr().write(|w| {
+        w.set_bs(13, !emitting);
+        w.set_br(13, emitting);
+
+        w.set_bs(14, emitting);
+        w.set_br(14, !emitting);
+    });
 }
