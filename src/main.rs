@@ -212,7 +212,7 @@ fn DMA1_CHANNEL2_3() {
     let isr = pac::DMA1.isr().read();
 
     if isr.tcif(3 - 1) {
-        // Clear DMA CH1 TC flag.
+        // Clear DMA CH1 Transfer Complete flag.
         pac::DMA1.ifcr().write(|w| {
             w.set_tcif(3 - 1, true);
         });
@@ -220,7 +220,7 @@ fn DMA1_CHANNEL2_3() {
         // it.
         regenerate_waveform(1);
     } else if isr.htif(3 - 1) {
-        // Clear DMA CH1 TC flag.
+        // Clear DMA CH1 Half Transfer flag.
         pac::DMA1.ifcr().write(|w| {
             w.set_htif(3 - 1, true);
         });
