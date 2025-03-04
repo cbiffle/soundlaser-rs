@@ -53,6 +53,11 @@ smaller, faster, and in Rust. There are some differences:
   module, which isn't installed on my board.) Since they're not hooked up, I
   could not test this behavior, so I didn't reimplement it.
 
+- Like the original, this firmware suppresses the 40 kHz carrier output if the
+  input signal is quiet. The original would audibly pop when this happened due
+  to sudden carrier amplitude changes. This firmware fades the carrier in/out
+  over the course of about 10 ms, removing the pop.
+
 Since the source code for the original firmware was unavailable, I analyzed the
 PCB, managed to extract the original firmware image, and then pored over it in
 Ghidra until I understood exactly what it was doing. Then I wrote a replacement.
