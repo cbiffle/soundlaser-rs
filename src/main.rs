@@ -143,16 +143,11 @@ static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE]; 2] =
 #[cortex_m_rt::entry]
 fn main() -> ! {
     // To avoid glitching the output to full-negative for one or two wave
-    // cycles, go ahead and initialize the wavetable.
+    // cycles, go ahead and initialize the wavetable to not contain zeros.
     //
-    // Yes, this arguably duplicates the setup done before `main`. We could have
-    // written `WAVETABLE` with an initializer that sets each element to
-    // `MIDPOINT`. However, because memory initialization in rustc/llvm is
-    // pretty naive, this produces a complete initialized copy of `WAVETABLE` in
-    // flash at a cost of (currently) 256 bytes.
-    //
-    // Leaving it in .bss and initializing it with a loop is dramatically
-    // cheaper (about 25% the cost).
+    // This could also be done by initializing the static above to something
+    // other than zero, but that causes a full init image of the wavetable to be
+    // stored in flash. Initializing it with a loop is 25% the size.
     for half in &WAVETABLE {
         for sample in half {
             sample.store(MIDPOINT, Ordering::Relaxed);
