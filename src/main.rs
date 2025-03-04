@@ -89,6 +89,7 @@ use core::{
 use panic_halt as _;
 use stm32_metapac::{
     self as pac,
+    bdma::regs::Isr,
     flash::vals::Latency,
     gpio::vals::{Moder, Ospeedr, Pupdr},
     interrupt,
@@ -214,23 +215,29 @@ fn main() -> ! {
 #[interrupt]
 fn DMA1_CHANNEL2_3() {
     let isr = pac::DMA1.isr().read();
+    let mut flags_to_clear = Isr(0);
 
+    // Handle either TC or HT, but not both. which simplifies the compiler
+    // output.
+    let waveform_to_regen;
     if isr.tcif(3 - 1) {
-        // Clear DMA CH1 Transfer Complete flag.
-        pac::DMA1.ifcr().write(|w| {
-            w.set_tcif(3 - 1, true);
-        });
-        // DMA has just finished the second copy of the wavetable, so regenerate
-        // it.
-        regenerate_waveform(1);
+        // Transfer Complete, second half just finished.
+        flags_to_clear.set_tcif(3 - 1, true);
+        waveform_to_regen = 1;
     } else if isr.htif(3 - 1) {
-        // Clear DMA CH1 Half Transfer flag.
-        pac::DMA1.ifcr().write(|w| {
-            w.set_htif(3 - 1, true);
-        });
-        // DMA has just finished the _first_ copy of the wavetable.
-        regenerate_waveform(0);
+        // Half Transfer, first half just finished.
+        flags_to_clear.set_htif(3 - 1, true);
+        waveform_to_regen = 0;
+    } else {
+        // Unhandled interrupt condition?? This should not be possible if our
+        // interrupt setup is correct.
+        //
+        // The ISR will recur and we'll wind up triggering the watchdog.
+        return;
     }
+
+    pac::DMA1.ifcr().write_value(flags_to_clear);
+    regenerate_waveform(waveform_to_regen);
 }
 
 /// Fills in `WAVEFORM[which]` with a new pattern based on the current ADC
