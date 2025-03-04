@@ -245,6 +245,12 @@ fn regenerate_waveform(which: usize) {
     // how long the input has been "quiet."
     static QUIET_TIME: AtomicU32 = AtomicU32::new(0);
 
+    // Volume factor applied to the output wave, as a 0.16 fixed point number.
+    // This is adjusted based on quiet detection to do a smooth fade in/out.
+    // Note that the 0.16 format means it can never be 1.0; this doesn't matter
+    // in practice since the difference is smaller than the DAC LSB.
+    static FADE_FACTOR: AtomicU16 = AtomicU16::new(0);
+
     // Light the indicator LED to help indicate how much CPU time is being spent
     // doing this.
     set_diagnostic_led(true);
@@ -264,56 +270,61 @@ fn regenerate_waveform(which: usize) {
     };
     QUIET_TIME.store(quiet_time_now, Ordering::Relaxed);
 
-    if quiet_time_now < 0x1200 {
-        let sample = u32::from(sample);
+    // Update the fade factor: down if quiet, up if not.
+    let fade = FADE_FACTOR.load(Ordering::Relaxed);
+    FADE_FACTOR.store(
+        if quiet_time_now < 0x1200 {
+            fade.saturating_add(16)
+        } else {
+            fade.saturating_sub(16)
+        },
+        Ordering::Relaxed,
+    );
 
-        // Update the waveform. Since we're generating a sine wave, the two
-        // halves are symmetrical, and we can generate them at the same time by
-        // applying different offsets from the midpoint.
+    // Generate the waveform even if the result is DC due to the fade factor.
+    // This is technically wasted work, but it simplifies things and keeps
+    // timing predictable.
+    let sample = (u32::from(sample) * u32::from(fade)) >> 16;
+
+    // Update the waveform. Since we're generating a sine wave, the two halves
+    // are symmetrical, and we can generate them at the same time by applying
+    // different offsets from the midpoint.
+    //
+    // First, break the waveform table in half:
+    let (pos_cycle, neg_cycle) =
+        WAVETABLE[which].split_at(COEFFICIENTS.len());
+    // Now, process the two halves and the coefficient table in parallel.
+    for ((outp, outn), &coeff) in
+        pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS)
+    {
+        // Promote both sides to u32 so we can do a 16x16->32
+        // multiplication, and then take the top half, divided by 2.
         //
-        // First, break the waveform table in half:
-        let (pos_cycle, neg_cycle) =
-            WAVETABLE[which].split_at(COEFFICIENTS.len());
-        // Now, process the two halves and the coefficient table in parallel.
-        for ((outp, outn), &coeff) in
-            pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS)
-        {
-            // Promote both sides to u32 so we can do a 16x16->32
-            // multiplication, and then take the top half, divided by 2.
-            //
-            // We could remove the "divided by 2" part by halving the values in
-            // the COEFFICIENTS table, but using the full range of u16 makes the
-            // range analysis easier on the compiler, and "top half" and "top
-            // half divided by 2" are the same cost on ARMv6-M.
-            let x = ((sample * u32::from(coeff)) >> (17 + ATTENUATION)) as u16;
+        // We could remove the "divided by 2" part by halving the values in
+        // the COEFFICIENTS table, but using the full range of u16 makes the
+        // range analysis easier on the compiler, and "top half" and "top
+        // half divided by 2" are the same cost on ARMv6-M.
+        let x = ((sample * u32::from(coeff)) >> (17 + ATTENUATION)) as u16;
 
-            // Range of x:
-            //
-            // - coeff is in the range 0..=0xFFFF (by definition of u16)
-            // - sample is in the range 0..=0xFFF0 (12-bit left-aligned)
-            // - (coeff * sample) is thus in the range 0..=0xfffe_0001
-            // - thus x is in the range 0..=0x7fff.
-            //
-            // Since we're relying on the ranges of the types, and not the
-            // specific values of the COEFFICIENTS table, the compiler
-            // recognizes this and the addition/subtraction below do not
-            // generate overflow checks.
+        // Range of x:
+        //
+        // - coeff is in the range 0..=0xFFFF (by definition of u16)
+        // - sample is in the range 0..=0xFFF0 (12-bit left-aligned)
+        // - (coeff * sample) is thus in the range 0..=0xfffe_0001
+        // - thus x is in the range 0..=0x7fff.
+        //
+        // Since we're relying on the ranges of the types, and not the
+        // specific values of the COEFFICIENTS table, the compiler
+        // recognizes this and the addition/subtraction below do not
+        // generate overflow checks.
 
-            // Generate two samples on opposite sides of our midpoint.
-            outp.store(MIDPOINT + x, Ordering::Relaxed);
-            outn.store(MIDPOINT - x, Ordering::Relaxed);
-        }
-        // Switch the state of the indicator lights to show that we're producing
-        // a carrier.
-        set_warning_led(true);
-    } else {
-        // Blank the stored waveform to stop producing a carrier.
-        for sample in &WAVETABLE[which] {
-            sample.store(MIDPOINT, Ordering::Relaxed);
-        }
-        // Switch the state of the indicator lights.
-        set_warning_led(false);
+        // Generate two samples on opposite sides of our midpoint.
+        outp.store(MIDPOINT + x, Ordering::Relaxed);
+        outn.store(MIDPOINT - x, Ordering::Relaxed);
     }
+
+    // Indicate whether we're producing carrier or not via the indicator lights.
+    set_warning_led(fade != 0);
 
     if !cfg!(feature = "disable-iwdg") {
         // Reassure the watchdog timer that we're making forward progress.
