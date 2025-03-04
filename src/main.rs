@@ -298,8 +298,7 @@ fn regenerate_waveform(which: usize) {
     // different offsets from the midpoint.
     //
     // First, break the waveform table in half:
-    let (pos_cycle, neg_cycle) =
-        WAVETABLE[which].split_at(COEFFICIENTS.len());
+    let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
     // Now, process the two halves and the coefficient table in parallel.
     for ((outp, outn), &coeff) in
         pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS)
@@ -663,11 +662,11 @@ fn set_diagnostic_led(state: bool) {
 }
 
 fn set_warning_led(emitting: bool) {
-    // Extinguish the GREEN LED and light the RED LED.
     pac::GPIOB.bsrr().write(|w| {
+        // PB13 = green = !emitting
         w.set_bs(13, !emitting);
         w.set_br(13, emitting);
-
+        // PB14 = red = emitting
         w.set_bs(14, emitting);
         w.set_br(14, !emitting);
     });
