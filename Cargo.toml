@@ -1,5 +1,5 @@
 [package]
-name = "knockoff"
+name = "soundlaser"
 version = "0.1.0"
 edition = "2024"
 
@@ -23,6 +23,6 @@ opt-level = "s"
 overflow-checks = true
 
 [[bin]]
-name = "knockoff"
+name = "soundlaser"
 test = false
 bench = false
