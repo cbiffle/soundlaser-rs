@@ -73,8 +73,10 @@
 //!   and avoids output glitches. The generated sine wave is scaled according to
 //!   the most recent ADC conversion result, providing amplitude modulation.
 //!
-//! - Because the ADC result is only considered at zero-crossings in the output
-//!   sine wave, we have an effective "sample rate" of 40 kHz.
+//! - Because the ADC result is only considered at the starting zero-crossing in
+//!   the output sine wave, we have an effective "sample rate" of 40 kHz. (This
+//!   is a slight simplification; since the ADC is free-running it's sampling at
+//!   something like 144 kHz, and we're downsampling that naïvely.)
 //!
 //! Once booted, this program spends all of its time either waiting for
 //! interrupts, or processing the interrupt handler.
@@ -133,22 +135,21 @@ const ATTENUATION: u32 = 2;
 /// that have been "left-aligned" by left-shifting 4 bits.
 const MIDPOINT: u16 = (u16::MAX / 2) + 1;
 
-/// Our RAM wavetable buffer, filled in from the DMA ISR. We have two copies of
-/// the wavetable so we can update one while the other is streaming. This uses
-/// atomics to ensure that all accesses avoid tearing when racing DMA. It also
-/// makes access to the static array more convenient (i.e. not unsafe).
+/// Our RAM wavetable buffer, filled in from the DMA ISR. This is
+/// double-buffered; we output `WAVETABLE[0]` while updating `WAVETABLE[1]` and
+/// vice versa.
+///
+/// Note that this is deliberately zeroed so it goes in BSS; see the init code
+/// at the top of main.
 static WAVETABLE: [[AtomicU16; WAVETABLE_SIZE]; 2] =
     [const { [const { AtomicU16::new(0) }; WAVETABLE_SIZE] }; 2];
 
 /// Firmware entry point and main loop.
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    // To avoid glitching the output to full-negative for one or two wave
-    // cycles, go ahead and initialize the wavetable to not contain zeros.
-    //
-    // This could also be done by initializing the static above to something
-    // other than zero, but that causes a full init image of the wavetable to be
-    // stored in flash. Initializing it with a loop is 25% the size.
+    // Ensure our analog output starts out DC-neutral, avoiding a glitch. We
+    // do this in a loop instead of by initializing `WAVETABLE` because the loop
+    // code is 25% the size of an initialization image.
     for half in &WAVETABLE {
         for sample in half {
             sample.store(MIDPOINT, Ordering::Relaxed);
@@ -214,20 +215,24 @@ fn main() -> ! {
 /// wavetable: once at the halfway point, and once at the end.
 #[interrupt]
 fn DMA1_CHANNEL2_3() {
+    // Light the indicator LED to help indicate how much CPU time is being spent
+    // doing this.
+    set_diagnostic_led(true);
+
     let isr = pac::DMA1.isr().read();
     let mut flags_to_clear = Isr(0);
 
     // Handle either TC or HT, but not both. which simplifies the compiler
     // output.
-    let waveform_to_regen;
+    let regen_index;
     if isr.tcif(3 - 1) {
         // Transfer Complete, second half just finished.
         flags_to_clear.set_tcif(3 - 1, true);
-        waveform_to_regen = 1;
+        regen_index = 1;
     } else if isr.htif(3 - 1) {
         // Half Transfer, first half just finished.
         flags_to_clear.set_htif(3 - 1, true);
-        waveform_to_regen = 0;
+        regen_index = 0;
     } else {
         // Unhandled interrupt condition?? This should not be possible if our
         // interrupt setup is correct.
@@ -237,16 +242,17 @@ fn DMA1_CHANNEL2_3() {
     }
 
     pac::DMA1.ifcr().write_value(flags_to_clear);
-    regenerate_waveform(waveform_to_regen);
-}
 
-/// Fills in `WAVEFORM[which]` with a new pattern based on the current ADC
-/// level.
-fn regenerate_waveform(which: usize) {
+    // Regenerate the chosen copy of the wavetable!
+
     // Size of band around zero that we treat as "quiet," for the purpose of
     // suppressing the carrier signal.
     const DEADZONE: u16 = 2400;
     const ZERO_RANGE: Range<u16> = MIDPOINT - DEADZONE..MIDPOINT + DEADZONE;
+
+    // Number of samples of "quiet" that need to see in a row before we start
+    // fading out the carrier.
+    const QUIET_ENOUGH: u32 = 0x1200;
 
     // We update this variable each time through the routine, to keep track of
     // how long the input has been "quiet."
@@ -257,10 +263,6 @@ fn regenerate_waveform(which: usize) {
     // Note that the 0.16 format means it can never be 1.0; this doesn't matter
     // in practice since the difference is smaller than the DAC LSB.
     static FADE_FACTOR: AtomicU16 = AtomicU16::new(0);
-
-    // Light the indicator LED to help indicate how much CPU time is being spent
-    // doing this.
-    set_diagnostic_led(true);
 
     // Read the most recent ADC sample. The ADC updates at around 144 kHz, so
     // this will be at most 6.94 µs old. (We produce one cycle of output every
@@ -280,7 +282,7 @@ fn regenerate_waveform(which: usize) {
     // Update the fade factor: down if quiet, up if not.
     let fade = FADE_FACTOR.load(Ordering::Relaxed);
     FADE_FACTOR.store(
-        if quiet_time_now < 0x1200 {
+        if quiet_time_now < QUIET_ENOUGH {
             fade.saturating_add(16)
         } else {
             fade.saturating_sub(16)
@@ -291,26 +293,24 @@ fn regenerate_waveform(which: usize) {
     // Generate the waveform even if the result is DC due to the fade factor.
     // This is technically wasted work, but it simplifies things and keeps
     // timing predictable.
-    let sample = (u32::from(sample) * u32::from(fade)) >> 16;
+    let sample = mul16x16_top(sample, fade);
 
     // Update the waveform. Since we're generating a sine wave, the two halves
     // are symmetrical, and we can generate them at the same time by applying
     // different offsets from the midpoint.
     //
     // First, break the waveform table in half:
-    let (pos_cycle, neg_cycle) = WAVETABLE[which].split_at(COEFFICIENTS.len());
+    let (pos_cycle, neg_cycle) =
+        WAVETABLE[regen_index].split_at(COEFFICIENTS.len());
     // Now, process the two halves and the coefficient table in parallel.
     for ((outp, outn), &coeff) in
         pos_cycle.iter().zip(neg_cycle).zip(&COEFFICIENTS)
     {
-        // Promote both sides to u32 so we can do a 16x16->32
-        // multiplication, and then take the top half, divided by 2.
-        //
-        // We could remove the "divided by 2" part by halving the values in
-        // the COEFFICIENTS table, but using the full range of u16 makes the
-        // range analysis easier on the compiler, and "top half" and "top
-        // half divided by 2" are the same cost on ARMv6-M.
-        let x = ((sample * u32::from(coeff)) >> (17 + ATTENUATION)) as u16;
+        // Multiply sample x coeff as 16-bit fractions and then divide by 2 (or
+        // more, determined by `ATTENUATION`). (The divide-by-2 is done here
+        // instead of altering the contents of `COEFFICIENTS` because it makes
+        // compiler range analysis easier.)
+        let x = mul16x16_top(sample, coeff) >> (1 + ATTENUATION);
 
         // Range of x:
         //
@@ -550,9 +550,8 @@ fn configure_dac() {
     let dac = pac::DAC1;
 
     dac.cr().write(|w| {
-        // Disable output buffer.
-        //
-        // This keeps us from overdriving the output stage.
+        // Disable output buffer. This keeps us from overdriving the output
+        // stage.
         w.set_boff(0, true);
         // Enable external trigger.
         w.set_ten(0, true);
@@ -670,4 +669,11 @@ fn set_warning_led(emitting: bool) {
         w.set_bs(14, emitting);
         w.set_br(14, !emitting);
     });
+}
+
+/// Performs a 16x16 -> 32 bit multiplication but only returns the top half.
+/// This is useful for implementing fixed-point multiplication with 16
+/// fractional bits.
+fn mul16x16_top(a: u16, b: u16) -> u16 {
+    ((u32::from(a) * u32::from(b)) >> 16) as u16
 }
