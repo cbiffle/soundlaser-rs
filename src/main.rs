@@ -495,16 +495,22 @@ fn configure_adc() {
 
     let adc = pac::ADC1;
 
-    adc.cfgr1().modify(|w| {
-        // Continuous conversion
-        w.set_cont(true);
+    adc.cfgr1().write(|w| {
         // Left-align the 12-bit sample in the 16-bit field, producing a value
         // in the range 0..=0xFFF0. This makes some math downstream more
         // convenient.
         w.set_align(pac::adc::vals::Align::LEFT);
 
-        // Defaults restated here for clarity.
-        w.set_res(pac::adc::vals::Res::BITS12);
+        // Use non-continuous mode with the DAC timer as our trigger.
+        w.set_exten(stm32_metapac::adc::vals::Exten::FALLING_EDGE);
+        w.set_extsel(0b010); // TIM2 TRGO
+
+        // 12-bit mode is default.
+    });
+    adc.cfgr2().write(|w| {
+        // Use a 12 MHz input clock, allowing the HSI14 to turn off and
+        // eliminating synchronizers on the bus interface.
+        w.set_ckmode(stm32_metapac::adc::vals::Ckmode::PCLK_DIV4);
     });
 
     adc.chselr().write(|w| {
