@@ -1,5 +1,8 @@
 # `soundlaser-rs`
 
+(Note: the canonical repo for this project is [on
+Codeberg](https://codeberg.org/cliffle/soundlaser-rs).)
+
 Alternate, open-source firmware for a cheap sound-from-ultrasound directional
 speaker (or "soundlaser").
 
